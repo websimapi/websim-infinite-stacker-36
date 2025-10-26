@@ -324,15 +324,6 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
                 replayUrl: submissionData.replayUrl,
                 timestamp: submissionData.timestamp
             };
-
-            // If the user has a score and the new one isn't higher, we still record it, but UI message differs.
-            const isNewHighScore = !userProfile || submissionData.score > (userProfile.highScore || 0);
-            if (!isNewHighScore && !isResubmission) {
-                console.log('Score not higher than user\'s best.');
-                if (!ui.gameOverElement.classList.contains('hidden')) {
-                    ui.setSubmitStatus('Not a new high score.', '#ff9800');
-                }
-            }
             
             let replayUrl = submissionData.replayUrl;
             if (hasReplay && replayBlob) {
@@ -371,11 +362,18 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
             }
 
             if (!ui.gameOverElement.classList.contains('hidden') && !isResubmission) {
-                 ui.setSubmitStatus(isNewHighScore ? 'Saving new high score...' : 'Saving score...', '#ff9800');
+                 ui.setSubmitStatus('Saving score...', '#ff9800');
             }
 
             if (userProfile) {
-                const updatedScores = [newScoreEntry, ...(userProfile.scores || [])];
+                let updatedScores = [newScoreEntry, ...(userProfile.scores || [])];
+                
+                // Limit to 10 scores, removing the lowest
+                if (updatedScores.length > 10) {
+                    updatedScores.sort((a, b) => b.score - a.score); // Sort descending by score
+                    updatedScores = updatedScores.slice(0, 10);
+                }
+                
                 const newHighScore = Math.max(submissionData.score, userProfile.highScore || 0);
 
                 await room.collection(USER_PROFILE_COLLECTION).update(userProfile.id, {
@@ -384,7 +382,7 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
                 });
 
                 if (!ui.gameOverElement.classList.contains('hidden') && !isResubmission) {
-                    ui.setSubmitStatus(isNewHighScore ? 'High score updated!' : 'Score saved!', '#4CAF50');
+                    ui.setSubmitStatus(submissionData.score >= (userProfile.highScore || 0) ? 'High score updated!' : 'Score saved!', '#4CAF50');
                 }
             } else {
                 await room.collection(USER_PROFILE_COLLECTION).create({
