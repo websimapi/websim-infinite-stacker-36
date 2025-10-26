@@ -254,13 +254,27 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
 
     const isResubmission = !!localTempId;
     let tempId = localTempId;
+    let submissionData;
 
-    if (!isResubmission && currentUser) {
-        tempId = ScoreStorage.saveUserScore(currentUser.username, {
+    if (isResubmission) {
+        const localScores = ScoreStorage.getUserScores(currentUser.username);
+        const localScore = localScores.find(s => s.tempId === localTempId);
+        if (localScore) {
+            submissionData = { ...localScore };
+        } else {
+            console.error("Could not find local score for resubmission.");
+            return;
+        }
+    } else {
+        submissionData = {
             score: scoreToSubmit,
             replayUrl: null,
-            timestamp: Date.now()
-        });
+            timestamp: new Date().toISOString(),
+        };
+    }
+
+    if (!isResubmission && currentUser) {
+        tempId = ScoreStorage.saveUserScore(currentUser.username, submissionData);
     }
 
     // Add visual indicator to trophy button
@@ -294,7 +308,7 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
             // --- Leaderboard Cap Logic ---
             if (allProfiles.length >= LEADERBOARD_MAX_SIZE) {
                 const lowestHighScore = allProfiles.reduce((min, p) => (p.highScore || 0) < min ? p.highScore : min, Infinity);
-                if (scoreToSubmit <= lowestHighScore) {
+                if (submissionData.score <= lowestHighScore) {
                     console.log('Score too low for full leaderboard.');
                     if (!ui.gameOverElement.classList.contains('hidden') && !isResubmission) {
                         ui.setSubmitStatus(`Score must be > ${lowestHighScore} to make the leaderboard.`, '#ff9800');
@@ -306,13 +320,13 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
 
             const userProfile = currentUserProfile;
             const newScoreEntry = {
-                score: scoreToSubmit,
-                replayUrl: null,
-                timestamp: new Date().toISOString()
+                score: submissionData.score,
+                replayUrl: submissionData.replayUrl,
+                timestamp: submissionData.timestamp
             };
 
             // If the user has a score and the new one isn't higher, we still record it, but UI message differs.
-            const isNewHighScore = !userProfile || scoreToSubmit > (userProfile.highScore || 0);
+            const isNewHighScore = !userProfile || submissionData.score > (userProfile.highScore || 0);
             if (!isNewHighScore && !isResubmission) {
                 console.log('Score not higher than user\'s best.');
                 if (!ui.gameOverElement.classList.contains('hidden')) {
@@ -320,7 +334,7 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
                 }
             }
             
-            let replayUrl = null;
+            let replayUrl = submissionData.replayUrl;
             if (hasReplay && replayBlob) {
                 try {
                     replayUrl = await window.websim.upload(replayBlob);
@@ -362,7 +376,7 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
 
             if (userProfile) {
                 const updatedScores = [newScoreEntry, ...(userProfile.scores || [])];
-                const newHighScore = Math.max(scoreToSubmit, userProfile.highScore || 0);
+                const newHighScore = Math.max(submissionData.score, userProfile.highScore || 0);
 
                 await room.collection(USER_PROFILE_COLLECTION).update(userProfile.id, {
                     scores: updatedScores,
@@ -375,7 +389,7 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
             } else {
                 await room.collection(USER_PROFILE_COLLECTION).create({
                     scores: [newScoreEntry],
-                    highScore: scoreToSubmit
+                    highScore: submissionData.score
                 });
                 if (!ui.gameOverElement.classList.contains('hidden') && !isResubmission) {
                     ui.setSubmitStatus('High score submitted!', '#4CAF50');
@@ -418,30 +432,50 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
 async function syncLocalScores() {
     if (!currentUser) return;
 
-    const localScores = ScoreStorage.getUserScores(currentUser.username);
-    if (localScores.length === 0) return;
-
-    console.log(`Found ${localScores.length} local scores to check.`);
-
+    let localScores = ScoreStorage.getUserScores(currentUser.username);
     const userProfile = currentUserProfile;
-    const dbScores = userProfile ? userProfile.scores || [] : [];
+    const dbScores = userProfile ? (userProfile.scores || []) : [];
 
+    if (localScores.length === 0 && dbScores.length === 0) {
+        return; // Nothing to sync
+    }
+
+    console.log(`Syncing scores. Local: ${localScores.length}, DB: ${dbScores.length}`);
+
+    const localTimestamps = new Set(localScores.map(s => s.timestamp));
+    const dbTimestamps = new Set(dbScores.map(s => s.timestamp));
+
+    // 1. Find scores in DB that are NOT in local storage and add them locally.
+    const scoresToAddToLocal = dbScores.filter(dbScore => !localTimestamps.has(dbScore.timestamp));
+    if (scoresToAddToLocal.length > 0) {
+        console.log(`Adding ${scoresToAddToLocal.length} scores from DB to local storage.`);
+        scoresToAddToLocal.forEach(score => {
+            // saveUserScore will add a tempId automatically
+            ScoreStorage.saveUserScore(currentUser.username, {
+                score: score.score,
+                replayUrl: score.replayUrl,
+                timestamp: score.timestamp
+            });
+        });
+    }
+    
+    // Refresh localScores after potential additions
+    localScores = ScoreStorage.getUserScores(currentUser.username);
+
+    // 2. Find scores in local storage that are NOT in DB and submit them.
+    // Also handle scores that might be synced but local copy can be removed.
     for (const localScore of localScores) {
-        // A simple check: if a score with the exact value and replay URL exists, assume it's synced.
-        const isSynced = dbScores.some(dbScore =>
-            dbScore.score === localScore.score &&
-            (!localScore.replayUrl || dbScore.replayUrl === localScore.replayUrl)
-        );
+        const isSynced = dbTimestamps.has(localScore.timestamp);
 
-        if (!isSynced) {
-            console.log(`Resubmitting local score: ${localScore.score}`);
+        if (isSynced) {
+            // It's on the server, so we can clean it up locally.
+            // This case might happen if a previous sync-up succeeded but the local removal failed.
+            ScoreStorage.removeUserScore(currentUser.username, localScore.tempId);
+        } else {
+            console.log(`Resubmitting local score: ${localScore.score} from ${localScore.timestamp}`);
             // Resubmit. This uses the autoSubmit logic which includes all checks.
-            // We pass null for the blob because we can't store it, but we have the URL.
             const hasReplay = !!localScore.replayUrl;
             autoSubmitScore(null, localScore.score, hasReplay, localScore.tempId);
-        } else {
-            // It's on the server, so we can clean it up locally.
-            ScoreStorage.removeUserScore(currentUser.username, localScore.tempId);
         }
     }
 }
