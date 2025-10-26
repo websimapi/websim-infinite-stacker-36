@@ -16,11 +16,51 @@ let pendingSubmissions = []; // Track background submissions
 let currentUser = null;
 let currentUserProfile = null;
 let migrationInProgress = false;
+let allProfiles = [];
+let allOldScores = [];
 
 const room = new WebsimSocket();
 const OLD_SCORE_COLLECTION = 'score_v1';
 const USER_PROFILE_COLLECTION = 'user_profiles_v1';
 const LEADERBOARD_MAX_SIZE = 1000;
+
+function rebuildLeaderboard() {
+    const migratedUsernames = new Set(allProfiles.map(p => p.username));
+    
+    // 1. Process migrated users (from profiles)
+    const leaderboardScores = allProfiles.map(profile => {
+        const highScoreData = profile.scores?.find(s => s.score === profile.highScore);
+        return {
+            username: profile.username,
+            score: profile.highScore || 0,
+            replayUrl: highScoreData ? highScoreData.replayUrl : null,
+        };
+    });
+
+    // 2. Process non-migrated users (from old scores)
+    const oldScoresByUser = {};
+    for (const score of allOldScores) {
+        if (score.username && !migratedUsernames.has(score.username)) {
+            if (!oldScoresByUser[score.username] || score.score > oldScoresByUser[score.username].score) {
+                oldScoresByUser[score.username] = {
+                    username: score.username,
+                    score: score.score,
+                    replayUrl: score.replayUrl || null,
+                };
+            }
+        }
+    }
+
+    Object.values(oldScoresByUser).forEach(score => leaderboardScores.push(score));
+
+    // 3. Sort and update UI
+    const sortedScores = leaderboardScores.sort((a, b) => b.score - a.score);
+    
+    ui.updateLeaderboard(sortedScores, (replayUrl) => {
+        ui.showReplayViewer(replayUrl);
+    });
+}
+
 
 async function init() {
     const {
@@ -87,27 +127,17 @@ async function init() {
     
     setupEventListeners();
     
-    // Subscribe to the new user profile collection for the leaderboard
     room.collection(USER_PROFILE_COLLECTION).subscribe(profiles => {
-        const sortedProfiles = profiles.sort((a, b) => (b.highScore || 0) - (a.highScore || 0));
-        
-        // Transform profiles into the format the UI expects
-        const leaderboardScores = sortedProfiles.map(profile => {
-            const highScoreData = profile.scores?.find(s => s.score === profile.highScore);
-            return {
-                username: profile.username,
-                score: profile.highScore,
-                replayUrl: highScoreData ? highScoreData.replayUrl : null,
-            };
-        });
-        
-        ui.updateLeaderboard(leaderboardScores, (replayUrl) => {
-            ui.showReplayViewer(replayUrl);
-        });
-
+        allProfiles = profiles;
         if (currentUser) {
             currentUserProfile = profiles.find(p => p.username === currentUser.username) || null;
         }
+        rebuildLeaderboard();
+    });
+
+    room.collection(OLD_SCORE_COLLECTION).subscribe(scores => {
+        allOldScores = scores;
+        rebuildLeaderboard();
     });
 
     renderer.setAnimationLoop(animate);
