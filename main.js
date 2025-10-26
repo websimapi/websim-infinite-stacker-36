@@ -15,6 +15,7 @@ let skyScene, skyCamera;
 let pendingSubmissions = []; // Track background submissions
 let currentUser = null;
 let currentUserProfile = null;
+let migrationInProgress = false;
 
 const room = new WebsimSocket();
 const OLD_SCORE_COLLECTION = 'score_v1';
@@ -53,7 +54,7 @@ async function init() {
     window.websim.getCurrentUser().then(async (user) => {
         currentUser = user;
         if (user) {
-            await migrateUserScores();
+            migrateUserScores(); // No await here, it runs in the background
         }
         syncLocalScores();
     });
@@ -113,32 +114,47 @@ async function init() {
     startGame();
 }
 
+function getDataOnce(collection, filterFn = () => true) {
+    return new Promise(resolve => {
+        const unsubscribe = collection.subscribe(items => {
+            const filteredItems = items.filter(filterFn);
+            if (items.length > 0 || (items.length === 0 && collection.getList().length === 0)) { // Ensure it's not just an initial empty list
+                unsubscribe();
+                resolve(filteredItems);
+            }
+        });
+    });
+}
+
 async function migrateUserScores() {
-    if (!currentUser) return;
-    
-    const profiles = room.collection(USER_PROFILE_COLLECTION).getList();
-    let userProfile = profiles.find(p => p.username === currentUser.username);
+    if (!currentUser || migrationInProgress) return;
+    migrationInProgress = true;
 
-    if (userProfile) {
-        currentUserProfile = userProfile;
-        console.log("User profile already exists. No migration needed.");
-        return;
-    }
+    try {
+        const [profiles, oldScores] = await Promise.all([
+            getDataOnce(room.collection(USER_PROFILE_COLLECTION), p => p.username === currentUser.username),
+            getDataOnce(room.collection(OLD_SCORE_COLLECTION), s => s.username === currentUser.username)
+        ]);
 
-    const oldScores = room.collection(OLD_SCORE_COLLECTION).getList().filter(s => s.username === currentUser.username);
+        let userProfile = profiles[0] || null;
 
-    if (oldScores.length > 0) {
-        console.log(`Migrating ${oldScores.length} scores for user ${currentUser.username}...`);
-        
-        const newScoresArray = oldScores.map(s => ({
-            score: s.score,
-            replayUrl: s.replayUrl || null,
-            timestamp: s.created_at
-        })).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        
-        const highScore = Math.max(...newScoresArray.map(s => s.score), 0);
-        
-        try {
+        if (userProfile) {
+            currentUserProfile = userProfile;
+            console.log("User profile already exists. No migration needed.");
+            return;
+        }
+
+        if (oldScores.length > 0) {
+            console.log(`Migrating ${oldScores.length} scores for user ${currentUser.username}...`);
+            
+            const newScoresArray = oldScores.map(s => ({
+                score: s.score,
+                replayUrl: s.replayUrl || null,
+                timestamp: s.created_at
+            })).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            
+            const highScore = Math.max(...newScoresArray.map(s => s.score), 0);
+            
             const newProfile = await room.collection(USER_PROFILE_COLLECTION).create({
                 scores: newScoresArray,
                 highScore: highScore
@@ -146,16 +162,21 @@ async function migrateUserScores() {
             currentUserProfile = newProfile;
             console.log("Migration successful. New profile created.");
 
-            // Clean up old scores after successful migration
             for (const oldScore of oldScores) {
-                await room.collection(OLD_SCORE_COLLECTION).delete(oldScore.id);
+                try {
+                    await room.collection(OLD_SCORE_COLLECTION).delete(oldScore.id);
+                } catch (deleteError) {
+                    console.error(`Failed to delete old score ${oldScore.id}:`, deleteError);
+                }
             }
             console.log("Old scores cleaned up.");
-        } catch (error) {
-            console.error("Error during score migration:", error);
+        } else {
+            console.log("No old scores found to migrate.");
         }
-    } else {
-        console.log("No old scores found to migrate.");
+    } catch (error) {
+        console.error("Error during score migration:", error);
+    } finally {
+        migrationInProgress = false;
     }
 }
 
@@ -227,7 +248,16 @@ async function autoSubmitScore(replayBlob, scoreToSubmit, hasReplay, localTempId
             if (!currentUser) currentUser = userForSubmission;
             
             // Wait for any pending migration to complete before proceeding
-            await new Promise(resolve => setTimeout(resolve, 500)); 
+            if (migrationInProgress) {
+                await new Promise(resolve => {
+                    const checkInterval = setInterval(() => {
+                        if (!migrationInProgress) {
+                            clearInterval(checkInterval);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            } 
 
             const allProfiles = room.collection(USER_PROFILE_COLLECTION).getList();
             
