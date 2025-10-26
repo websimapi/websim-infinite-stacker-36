@@ -42,6 +42,31 @@ export class UIManager {
         this.prevPageButton.addEventListener('click', () => this.changePage(-1));
         this.nextPageButton.addEventListener('click', () => this.changePage(1));
         window.addEventListener('resize', onWindowResize, false);
+
+        this.globalScoresTab = document.getElementById('global-scores-tab');
+        this.myScoresTab = document.getElementById('my-scores-tab');
+
+        this.globalScoresTab.addEventListener('click', () => {
+            this.setActiveTab('global');
+            this.renderCurrentPage();
+        });
+
+        this.myScoresTab.addEventListener('click', () => {
+            this.setActiveTab('my-scores');
+            this.renderCurrentPage();
+        });
+    }
+
+    setActiveTab(tab) {
+        this.activeTab = tab;
+        this.currentPage = 0;
+        if (tab === 'global') {
+            this.globalScoresTab.classList.add('active');
+            this.myScoresTab.classList.remove('active');
+        } else {
+            this.globalScoresTab.classList.remove('active');
+            this.myScoresTab.classList.add('active');
+        }
     }
 
     updateStreak(count, isGolden, isPerfectHit) {
@@ -169,6 +194,7 @@ export class UIManager {
         this.currentPage = 0;
         this.leaderboardElement.classList.remove('hidden');
         this.gameOverElement.classList.add('hidden');
+        this.setActiveTab('global');
         this.renderCurrentPage();
     }
 
@@ -176,20 +202,31 @@ export class UIManager {
         this.leaderboardElement.classList.add('hidden');
     }
 
-    updateLeaderboard(scores, onViewReplayCallback) {
+    updateLeaderboard(scores, onViewReplayCallback, userProfile = null) {
         this.allScores = scores;
+        this.userProfile = userProfile;
         this.onViewReplayCallback = onViewReplayCallback;
-        this.currentPage = 0;
+        // Don't reset current page, let it be controlled by tab switching or showLeaderboard
+        // this.currentPage = 0; 
         this.renderCurrentPage();
     }
 
     changePage(delta) {
-        const totalPages = Math.ceil(this.allScores.length / this.itemsPerPage);
+        const scores = this.activeTab === 'my-scores' && this.userProfile ? (this.userProfile.scores || []) : this.allScores;
+        const totalPages = Math.ceil(scores.length / this.itemsPerPage);
         this.currentPage = Math.max(0, Math.min(totalPages - 1, this.currentPage + delta));
         this.renderCurrentPage();
     }
 
     renderCurrentPage() {
+        if (this.activeTab === 'my-scores') {
+            this.renderMyScoresPage();
+        } else {
+            this.renderGlobalPage();
+        }
+    }
+
+    renderGlobalPage() {
         const totalPages = Math.ceil(this.allScores.length / this.itemsPerPage);
         const startIndex = this.currentPage * this.itemsPerPage;
         const endIndex = Math.min(startIndex + this.itemsPerPage, this.allScores.length);
@@ -213,6 +250,45 @@ export class UIManager {
                 <span class="score">${entry.score}</span>
             `;
             if (entry.replayUrl) {
+                const button = document.createElement('button');
+                button.textContent = '▶️';
+                button.onclick = () => this.onViewReplayCallback(entry.replayUrl);
+                li.appendChild(button);
+            }
+            this.leaderboardList.appendChild(li);
+        });
+
+        this.prevPageButton.disabled = this.currentPage === 0;
+        this.nextPageButton.disabled = this.currentPage >= totalPages - 1;
+        this.pageInfoElement.textContent = `Page ${this.currentPage + 1} of ${totalPages}`;
+    }
+
+    renderMyScoresPage() {
+        if (!this.userProfile || !this.userProfile.scores || this.userProfile.scores.length === 0) {
+            this.leaderboardList.innerHTML = '<li>You have no scores yet.</li>';
+            this.prevPageButton.disabled = true;
+            this.nextPageButton.disabled = true;
+            this.pageInfoElement.textContent = 'Page 0';
+            return;
+        }
+
+        const myScores = [...this.userProfile.scores].sort((a, b) => b.score - a.score);
+        const totalPages = Math.ceil(myScores.length / this.itemsPerPage);
+        const startIndex = this.currentPage * this.itemsPerPage;
+        const endIndex = Math.min(startIndex + this.itemsPerPage, myScores.length);
+        const pageScores = myScores.slice(startIndex, endIndex);
+
+        this.leaderboardList.innerHTML = '';
+
+        pageScores.forEach((entry, index) => {
+            const rank = startIndex + index + 1;
+            const li = document.createElement('li');
+            li.innerHTML = `
+                <span class="rank">#${rank}</span>
+                <span class="username">${new Date(entry.timestamp).toLocaleDateString()}</span>
+                <span class="score">${entry.score}</span>
+            `;
+             if (entry.replayUrl) {
                 const button = document.createElement('button');
                 button.textContent = '▶️';
                 button.onclick = () => this.onViewReplayCallback(entry.replayUrl);

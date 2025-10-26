@@ -58,7 +58,7 @@ function rebuildLeaderboard() {
     
     ui.updateLeaderboard(sortedScores, (replayUrl) => {
         ui.showReplayViewer(replayUrl);
-    });
+    }, currentUserProfile);
 }
 
 
